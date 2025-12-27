@@ -2,7 +2,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-MEME_IMAGE_PATH = 'thinking_meme.jpg'
+MEME_IMAGE_PATH = 'thinking_meme.jpeg'
 SHOW_CAMERA_FEED = True
 
 ELBOW_ANGLE_THRESHOLD = 100
