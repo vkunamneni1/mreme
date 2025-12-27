@@ -168,10 +168,10 @@ while cap.isOpened():
             
             if r_pointing:
                 current_pose = "pointing"
-                is_flipped = True
+                is_flipped = False
             elif l_pointing:
                 current_pose = "pointing"
-                is_flipped = False
+                is_flipped = True
 
         if current_pose == "staring" and mouth_ratio > MOUTH_OPEN_THRESHOLD:
             current_pose = "shocked"
