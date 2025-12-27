@@ -5,8 +5,8 @@ import numpy as np
 MEME_IMAGE_PATH = 'memes/thinking_meme.jpeg'
 SHOW_CAMERA_FEED = True
 
-ELBOW_ANGLE_THRESHOLD = 100
-MOUTH_TOUCH_THRESHOLD = 0.15
+ELBOW_ANGLE_THRESHOLD = 110
+MOUTH_TOUCH_THRESHOLD = 0.12
 
 mp_holistic = mp.solutions.holistic
 holistic = mp_holistic.Holistic(
@@ -63,12 +63,12 @@ while cap.isOpened():
         r_angle = calculate_angle(
             [lms[12].x, lms[12].y], [lms[14].x, lms[14].y], [lms[16].x, lms[16].y]
         )
-        r_dist = calculate_distance([lms[16].x, lms[16].y], [lms[10].x, lms[10].y])
+        r_dist = calculate_distance([lms[20].x, lms[20].y], [lms[10].x, lms[10].y])
 
         l_angle = calculate_angle(
             [lms[11].x, lms[11].y], [lms[13].x, lms[13].y], [lms[15].x, lms[15].y]
         )
-        l_dist = calculate_distance([lms[15].x, lms[15].y], [lms[9].x, lms[9].y])
+        l_dist = calculate_distance([lms[19].x, lms[19].y], [lms[9].x, lms[9].y])
 
         cv2.putText(output_image, f"R_Ang:{int(r_angle)} R_Dist:{r_dist:.2f}", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
@@ -81,27 +81,16 @@ while cap.isOpened():
 
         if not pose_match:
             mp_drawing.draw_landmarks(
-                output_image,
-                results.pose_landmarks,
-                mp_holistic.POSE_CONNECTIONS,
-                landmark_drawing_spec=drawing_spec,
-                connection_drawing_spec=drawing_spec
+                output_image, results.pose_landmarks, mp_holistic.POSE_CONNECTIONS,
+                landmark_drawing_spec=drawing_spec, connection_drawing_spec=drawing_spec
             )
-
             mp_drawing.draw_landmarks(
-                output_image,
-                results.right_hand_landmarks,
-                mp_holistic.HAND_CONNECTIONS,
-                landmark_drawing_spec=hand_spec,
-                connection_drawing_spec=hand_spec
+                output_image, results.right_hand_landmarks, mp_holistic.HAND_CONNECTIONS,
+                landmark_drawing_spec=hand_spec, connection_drawing_spec=hand_spec
             )
-
             mp_drawing.draw_landmarks(
-                output_image,
-                results.left_hand_landmarks,
-                mp_holistic.HAND_CONNECTIONS,
-                landmark_drawing_spec=hand_spec,
-                connection_drawing_spec=hand_spec
+                output_image, results.left_hand_landmarks, mp_holistic.HAND_CONNECTIONS,
+                landmark_drawing_spec=hand_spec, connection_drawing_spec=hand_spec
             )
 
     final_display = meme_resized if pose_match else output_image
