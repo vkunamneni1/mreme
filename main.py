@@ -4,7 +4,7 @@ import numpy as np
 
 MEME_IMAGE_PATH = 'thinking_meme.jpg'
 
-DEBUG_MODE = True
+SHOW_CAMERA_FEED = True
 
 ELBOW_ANGLE_THRESHOLD = 90
 MOUTH_TOUCH_THRESHOLD = 0.15
@@ -43,7 +43,7 @@ while cap.isOpened():
         h, w, _ = image.shape
         meme_resized = cv2.resize(meme_img_original, (w, h))
 
-    if DEBUG_MODE:
+    if SHOW_CAMERA_FEED:
         output_image = image.copy()
     else:
         output_image = np.zeros(image.shape, dtype=np.uint8)
