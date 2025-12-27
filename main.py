@@ -2,20 +2,24 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-MEME_IMAGE_PATH = 'memes/thinking_meme.jpeg'
-
+MEME_IMAGE_PATH = 'thinking_meme.jpg'
 SHOW_CAMERA_FEED = True
 
-ELBOW_ANGLE_THRESHOLD = 90
+ELBOW_ANGLE_THRESHOLD = 100
 MOUTH_TOUCH_THRESHOLD = 0.15
 
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+mp_holistic = mp.solutions.holistic
+holistic = mp_holistic.Holistic(
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5,
+    smooth_landmarks=True
+)
+
 mp_drawing = mp.solutions.drawing_utils
 drawing_spec = mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=3, circle_radius=3)
+hand_spec = mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2, circle_radius=2)
 
 def calculate_angle(a, b, c):
-    """Calculates angle at joint b."""
     a, b, c = np.array(a), np.array(b), np.array(c)
     radians = np.arctan2(c[1] - b[1], c[0] - b[0]) - np.arctan2(a[1] - b[1], a[0] - b[0])
     angle = np.abs(radians * 180.0 / np.pi)
@@ -49,7 +53,7 @@ while cap.isOpened():
         output_image = np.zeros(image.shape, dtype=np.uint8)
 
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = pose.process(image_rgb)
+    results = holistic.process(image_rgb)
 
     pose_match = False
 
@@ -57,16 +61,12 @@ while cap.isOpened():
         lms = results.pose_landmarks.landmark
 
         r_angle = calculate_angle(
-            [lms[12].x, lms[12].y],
-            [lms[14].x, lms[14].y],
-            [lms[16].x, lms[16].y]
+            [lms[12].x, lms[12].y], [lms[14].x, lms[14].y], [lms[16].x, lms[16].y]
         )
         r_dist = calculate_distance([lms[16].x, lms[16].y], [lms[10].x, lms[10].y])
 
         l_angle = calculate_angle(
-            [lms[11].x, lms[11].y],
-            [lms[13].x, lms[13].y],
-            [lms[15].x, lms[15].y]
+            [lms[11].x, lms[11].y], [lms[13].x, lms[13].y], [lms[15].x, lms[15].y]
         )
         l_dist = calculate_distance([lms[15].x, lms[15].y], [lms[9].x, lms[9].y])
 
@@ -75,16 +75,33 @@ while cap.isOpened():
         cv2.putText(output_image, f"L_Ang:{int(l_angle)} L_Dist:{l_dist:.2f}", (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-        right_match = (r_angle < ELBOW_ANGLE_THRESHOLD and r_dist < MOUTH_TOUCH_THRESHOLD)
-        left_match  = (l_angle < ELBOW_ANGLE_THRESHOLD and l_dist < MOUTH_TOUCH_THRESHOLD)
-
-        if right_match or left_match:
+        if (r_angle < ELBOW_ANGLE_THRESHOLD and r_dist < MOUTH_TOUCH_THRESHOLD) or \
+           (l_angle < ELBOW_ANGLE_THRESHOLD and l_dist < MOUTH_TOUCH_THRESHOLD):
             pose_match = True
 
         if not pose_match:
             mp_drawing.draw_landmarks(
-                output_image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
-                landmark_drawing_spec=drawing_spec, connection_drawing_spec=drawing_spec
+                output_image,
+                results.pose_landmarks,
+                mp_holistic.POSE_CONNECTIONS,
+                landmark_drawing_spec=drawing_spec,
+                connection_drawing_spec=drawing_spec
+            )
+
+            mp_drawing.draw_landmarks(
+                output_image,
+                results.right_hand_landmarks,
+                mp_holistic.HAND_CONNECTIONS,
+                landmark_drawing_spec=hand_spec,
+                connection_drawing_spec=hand_spec
+            )
+
+            mp_drawing.draw_landmarks(
+                output_image,
+                results.left_hand_landmarks,
+                mp_holistic.HAND_CONNECTIONS,
+                landmark_drawing_spec=hand_spec,
+                connection_drawing_spec=hand_spec
             )
 
     final_display = meme_resized if pose_match else output_image
@@ -95,3 +112,4 @@ while cap.isOpened():
 
 cap.release()
 cv2.destroyAllWindows()
+holistic.close()
