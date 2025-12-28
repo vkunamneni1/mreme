@@ -44,6 +44,7 @@ def finger_pos(hand, idx=8):
     return [p.x, p.y, getattr(p, 'visibility', 1.0)]
 
 def mouth_open(face):
+    
     if not face: return 0
     lm = face.landmark
     vert = dist([lm[13].x, lm[13].y], [lm[14].x, lm[14].y])
