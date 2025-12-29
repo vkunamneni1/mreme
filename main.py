@@ -2,12 +2,8 @@ import cv2, mediapipe as mp, numpy as np, time, random, os
 from collections import deque
 
 debug = fullscreen = meme_only = paused = side_by_side = pip_mode = zoom = False
-challenge = reaction = combo = recording = False
-challenge_target = reaction_target = None
-challenge_time = reaction_time = 0
-challenge_score = combo_score = combo_idx = streak = 0
-best_reaction = float('inf')
-combo_seq = ["thinking", "pointing", "shocked"]
+recording = False
+streak = 0
 manual_idx = -1
 cam_idx = 0
 prev_meme = None
@@ -60,6 +56,109 @@ for k, v in memes.items():
 os.makedirs("screenshots", exist_ok=True)
 os.makedirs("recordings", exist_ok=True)
 cap = cv2.VideoCapture(cam_idx)
+
+def splash_screen():
+    W, H = 800, 600
+    splash = np.zeros((H, W, 3), dtype=np.uint8)
+    
+    cv2.namedWindow('Meme Mirror', cv2.WINDOW_NORMAL)
+    
+    for i in range(80):
+        splash[:] = (0, 0, 0)
+        
+        pulse = abs((i % 20) - 10) / 10
+        red = int(255 * pulse)
+        
+        (ww, wh), _ = cv2.getTextSize("WARNING", cv2.FONT_HERSHEY_DUPLEX, 2.5, 5)
+        cv2.putText(splash, "WARNING", (W//2 - ww//2, H//2 - 50), cv2.FONT_HERSHEY_DUPLEX, 2.5, (0, 0, red), 5)
+        
+        sub = "FLASHING LIGHTS / SEIZURE"
+        (sw, sh), _ = cv2.getTextSize(sub, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)
+        cv2.putText(splash, sub, (W//2 - sw//2, H//2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        
+        cv2.rectangle(splash, (W//2 - 280, H//2 - 130), (W//2 + 280, H//2 + 50), (0, 0, red), 3)
+        
+        hint = "Q = quit  /  SPACE = continue"
+        (hw, hh), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+        cv2.putText(splash, hint, (W//2 - hw//2, H//2 + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1)
+        
+        bar_w = int((i / 80) * 300)
+        cv2.rectangle(splash, (W//2 - 150, H//2 + 160), (W//2 - 150 + bar_w, H//2 + 175), (60, 60, 60), -1)
+        cv2.rectangle(splash, (W//2 - 150, H//2 + 160), (W//2 + 150, H//2 + 175), (60, 60, 60), 1)
+        
+        cv2.imshow('Meme Mirror', splash)
+        key = cv2.waitKey(40) & 0xFF
+        if key == ord('q'): return False
+        if key == ord(' ') and i > 15: break
+    
+    phrases = [
+        "this isnt a filter",
+        "ur cringe is loading",
+        "no refunds",
+        "pose or die", 
+        "not our fault",
+        "touch grass after",
+        "legal said no",
+        "powered by regret",
+    ]
+    
+    for i in range(90):
+        splash[:] = (0, 0, 0)
+        
+        if i < 25:
+            scale = 0.5 + (i / 25) * 3.5
+            thick = max(1, int(scale * 2))
+            (tw, th), _ = cv2.getTextSize("MEME", cv2.FONT_HERSHEY_DUPLEX, scale, thick)
+            cv2.putText(splash, "MEME", (W//2 - tw//2, H//2 + th//2), cv2.FONT_HERSHEY_DUPLEX, scale, (255,255,255), thick)
+        
+        elif i < 45:
+            offset = int(3 * np.sin(i * 0.5))
+            (mw, mh), _ = cv2.getTextSize("MEME", cv2.FONT_HERSHEY_DUPLEX, 3.5, 8)
+            (rw, rh), _ = cv2.getTextSize("MIRROR", cv2.FONT_HERSHEY_DUPLEX, 3.5, 8)
+            mx, rx = W//2 - mw//2, W//2 - rw//2
+            cv2.putText(splash, "MEME", (mx + offset, H//2 + 30), cv2.FONT_HERSHEY_DUPLEX, 3.5, (255,0,0), 8)
+            cv2.putText(splash, "MEME", (mx - offset, H//2 + 30), cv2.FONT_HERSHEY_DUPLEX, 3.5, (0,255,255), 8)
+            cv2.putText(splash, "MEME", (mx, H//2 + 30), cv2.FONT_HERSHEY_DUPLEX, 3.5, (255,255,255), 8)
+            cv2.putText(splash, "MIRROR", (rx + offset, H//2 + 130), cv2.FONT_HERSHEY_DUPLEX, 3.5, (255,0,0), 8)
+            cv2.putText(splash, "MIRROR", (rx - offset, H//2 + 130), cv2.FONT_HERSHEY_DUPLEX, 3.5, (0,255,255), 8)
+            cv2.putText(splash, "MIRROR", (rx, H//2 + 130), cv2.FONT_HERSHEY_DUPLEX, 3.5, (255,255,255), 8)
+        
+        elif i < 60:
+            bg = 255 if (i % 4 < 2) else 0
+            fg = 0 if bg else 255
+            splash[:] = (bg, bg, bg)
+            (mw, mh), _ = cv2.getTextSize("MEME", cv2.FONT_HERSHEY_DUPLEX, 3.5, 10)
+            (rw, rh), _ = cv2.getTextSize("MIRROR", cv2.FONT_HERSHEY_DUPLEX, 3.5, 10)
+            cv2.putText(splash, "MEME", (W//2 - mw//2, H//2 + 30), cv2.FONT_HERSHEY_DUPLEX, 3.5, (fg,fg,fg), 10)
+            cv2.putText(splash, "MIRROR", (W//2 - rw//2, H//2 + 130), cv2.FONT_HERSHEY_DUPLEX, 3.5, (fg,fg,fg), 10)
+            cv2.rectangle(splash, (W//2 - 250, H//2 - 40), (W//2 + 250, H//2 + 180), (fg,fg,fg), 5)
+        
+        elif i < 80:
+            phrase = phrases[(i-60) % len(phrases)]
+            (pw, ph), _ = cv2.getTextSize(phrase, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 2)
+            cv2.putText(splash, phrase, (W//2 - pw//2, H//2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,255), 2)
+            
+            pct = (i - 60) / 20
+            bar_w = int(pct * 500)
+            cv2.rectangle(splash, (W//2 - 250, H//2 + 80), (W//2 - 250 + bar_w, H//2 + 105), (255,255,255), -1)
+            cv2.rectangle(splash, (W//2 - 250, H//2 + 80), (W//2 + 250, H//2 + 105), (255,255,255), 2)
+            cv2.putText(splash, f"{int(pct*100)}%", (W//2 - 20, H//2 + 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0) if pct > 0.4 else (255,255,255), 2)
+        
+        else:
+            flash_v = 255 if (i % 2) else 0
+            splash[:] = (flash_v, flash_v, flash_v)
+            (gw, gh), _ = cv2.getTextSize("GO", cv2.FONT_HERSHEY_DUPLEX, 5, 15)
+            cv2.putText(splash, "GO", (W//2 - gw//2, H//2 + gh//2), cv2.FONT_HERSHEY_DUPLEX, 5, (0,0,0) if flash_v else (255,255,255), 15)
+        
+        cv2.imshow('Meme Mirror', splash)
+        if cv2.waitKey(45) & 0xFF == ord('q'): return False
+    
+    return True
+
+if not splash_screen():
+    cap.release()
+    cv2.destroyAllWindows()
+    exit()
 
 while cap.isOpened():
     ok, frame = cap.read()
@@ -118,7 +217,7 @@ while cap.isOpened():
             elif l_finger and l_finger[1] < nose[1] - 0.05:
                 pose, flip = "pointing", True
         
-        if pose == "staring" and mouth_ratio > 0.25:
+        if pose == "staring" and mouth_ratio > 0.5:
             pose = "shocked"
         
         if pose == "staring":
@@ -145,11 +244,11 @@ while cap.isOpened():
     
     if prev_meme is not None and prev_meme.shape == meme.shape:
         if alpha < 1.0:
-            alpha = min(1.0, alpha + 0.15)
+            alpha = min(1.0, alpha + 0.12)
             meme = cv2.addWeighted(prev_meme, 1-alpha, meme, alpha, 0)
         elif not np.array_equal(prev_meme, meme):
             alpha = 0.0
-            flash = 200
+            flash = 180
     prev_meme = sized[show_pose][ver].copy()
     
     if flash > 0:
@@ -165,53 +264,32 @@ while cap.isOpened():
         if x2-x1 > 50 and y2-y1 > 50:
             cam = cv2.resize(canvas[y1:y2, x1:x2], (w, h))
     
-    cv2.putText(cam, "MEME MIRROR", (w//2 - 100, 40), cv2.FONT_HERSHEY_DUPLEX, 1, (255,255,255), 2)
-    cv2.putText(cam, show_pose.upper(), (w-150, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, colors[show_pose], 2)
-    cv2.rectangle(cam, (0, h-8), (w, h), colors[show_pose], -1)
-    cv2.rectangle(cam, (3, 3), (w-3, h-3), (255,255,255), 2)
+    cv2.rectangle(cam, (0, 0), (w, 55), (0,0,0), -1)
+    title = "MEME MIRROR"
+    (tw, th), _ = cv2.getTextSize(title, cv2.FONT_HERSHEY_DUPLEX, 1.3, 2)
+    cv2.putText(cam, title, (w//2 - tw//2, 28 + th//2), cv2.FONT_HERSHEY_DUPLEX, 1.3, (255,255,255), 2)
+    
+    cv2.rectangle(cam, (10, 12), (42, 44), (0,0,0), -1)
+    cv2.rectangle(cam, (10, 12), (42, 44), (255,255,255), 2)
+    cv2.line(cam, (16, 18), (36, 38), (255,255,255), 2)
+    cv2.line(cam, (36, 18), (16, 38), (255,255,255), 2)
+    
+    pose_txt = show_pose.upper()
+    (pw, ph), _ = cv2.getTextSize(pose_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+    pose_x = w - pw - 25
+    cv2.rectangle(cam, (pose_x - 8, 12), (w - 10, 44), colors[show_pose], -1)
+    cv2.rectangle(cam, (pose_x - 8, 12), (w - 10, 44), (255,255,255), 2)
+    cv2.putText(cam, pose_txt, (pose_x, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 2)
+    
+    cv2.rectangle(cam, (0, h-10), (w, h), colors[show_pose], -1)
+    cv2.rectangle(cam, (1, 1), (w-1, h-1), (255,255,255), 2)
     
     if streak > 0:
-        cv2.putText(cam, f"x{streak}", (w-80, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-    
-    if challenge:
-        if challenge_target is None:
-            challenge_target = random.choice(["thinking", "pointing", "shocked"])
-            challenge_time = time.time()
-        left = 5 - (time.time() - challenge_time)
-        cv2.putText(cam, f"DO: {challenge_target.upper()}", (w//2-80, h//2), cv2.FONT_HERSHEY_DUPLEX, 1.2, (0,255,255), 3)
-        cv2.putText(cam, f"{left:.1f}s", (w//2-30, h//2+40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
-        cv2.putText(cam, f"Score: {challenge_score}", (w//2-50, h//2+80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-        if stable == challenge_target:
-            challenge_score += 1
-            challenge_target = None
-            flash = 255
-        elif left <= 0:
-            challenge_target = None
-    
-    if reaction:
-        if reaction_target is None:
-            reaction_target = random.choice(["thinking", "pointing", "shocked"])
-            reaction_time = time.time()
-        cv2.putText(cam, f"QUICK! {reaction_target.upper()}", (w//2-100, h//2), cv2.FONT_HERSHEY_DUPLEX, 1.2, (0,0,255), 3)
-        if stable == reaction_target:
-            rt = time.time() - reaction_time
-            if rt < best_reaction: best_reaction = rt
-            cv2.putText(cam, f"{rt:.2f}s", (w//2-40, h//2+40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-            reaction_target = None
-        if best_reaction < float('inf'):
-            cv2.putText(cam, f"Best: {best_reaction:.2f}s", (w//2-50, h//2+80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-    
-    if combo:
-        tgt = combo_seq[combo_idx]
-        cv2.putText(cam, f"{' > '.join(combo_seq)}", (10, h//2-20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
-        cv2.putText(cam, f"DO: {tgt.upper()}", (w//2-60, h//2+20), cv2.FONT_HERSHEY_DUPLEX, 1, (0,255,255), 2)
-        cv2.putText(cam, f"Combos: {combo_score}", (w//2-50, h//2+60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-        if stable == tgt:
-            combo_idx += 1
-            if combo_idx >= len(combo_seq):
-                combo_score += 1
-                combo_idx = 0
-                flash = 255
+        streak_txt = f"x{streak}"
+        (sw, sh), _ = cv2.getTextSize(streak_txt, cv2.FONT_HERSHEY_DUPLEX, 0.8, 2)
+        cv2.rectangle(cam, (w - sw - 20, 52), (w - 10, 82), (0,0,0), -1)
+        cv2.rectangle(cam, (w - sw - 20, 52), (w - 10, 82), (0,255,255), 2)
+        cv2.putText(cam, streak_txt, (w - sw - 15, 74), cv2.FONT_HERSHEY_DUPLEX, 0.8, (0,255,255), 2)
     
     half = cv2.resize(cam, (w, h//2))
     
@@ -229,14 +307,15 @@ while cap.isOpened():
     
     fps = 1 / (time.time() - t + 0.001)
     t = time.time()
-    cv2.putText(out, f"{int(fps)}fps", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+    fps_txt = f"{int(fps)}fps"
+    (fw, fh), _ = cv2.getTextSize(fps_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+    cv2.rectangle(out, (5, 5), (fw + 15, 30), (0,0,0), -1)
+    cv2.putText(out, fps_txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
     
-    mode = ""
-    if challenge: mode = "[CHALLENGE]"
-    elif reaction: mode = "[REACTION]"
-    elif combo: mode = "[COMBO]"
-    elif manual_idx >= 0: mode = "[MANUAL]"
-    if mode: cv2.putText(out, mode, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,165,0), 2)
+    if manual_idx >= 0:
+        (mw, mh), _ = cv2.getTextSize("MANUAL", cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+        cv2.rectangle(out, (5, 33), (mw + 15, 58), (255,165,0), -1)
+        cv2.putText(out, "MANUAL", (10, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2)
     
     if recording:
         cv2.circle(out, (out.shape[1]-30, 30), 10, (0,0,255), -1)
@@ -245,8 +324,18 @@ while cap.isOpened():
     
     gif_buf.append(out.copy())
     
-    cv2.putText(out, "Q=Quit D=Debug S=Screenshot F=Full P=Pause M=Meme B=Side I=PiP Z=Zoom", (10, out.shape[0]-25), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200,200,200), 1)
-    cv2.putText(out, "1-3=Modes R=Record G=GIF C=Camera Arrows=Manual", (10, out.shape[0]-10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200,200,200), 1)
+    oh, ow = out.shape[:2]
+    
+    quit_txt = "QUIT"
+    (qw, qh), _ = cv2.getTextSize(quit_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+    qx, qy = ow//2 - qw//2 - 8, oh - 35
+    cv2.rectangle(out, (qx, qy), (qx + qw + 16, oh - 10), (0,0,0), -1)
+    cv2.rectangle(out, (qx, qy), (qx + qw + 16, oh - 10), (255,255,255), 2)
+    cv2.putText(out, quit_txt, (qx + 8, oh - 17), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 2)
+    
+    hints = ["Q to quit", "vibes only", "no rules", "figure it out", "keys r cool", "gl hf"]
+    hint = hints[int(time.time()) % len(hints)]
+    cv2.putText(out, hint, (10, oh - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (60,60,60), 1)
     
     if fullscreen:
         cv2.namedWindow('Meme Mirror', cv2.WND_PROP_FULLSCREEN)
@@ -282,15 +371,6 @@ while cap.isOpened():
     elif key == ord('g'):
         for i, f in enumerate(gif_buf): cv2.imwrite(f"screenshots/gif_{i:03d}.png", f)
         flash = 255
-    elif key == ord('1'):
-        challenge, reaction, combo = not challenge, False, False
-        challenge_target, challenge_score = None, 0
-    elif key == ord('2'):
-        reaction, challenge, combo = not reaction, False, False
-        reaction_target, best_reaction = None, float('inf')
-    elif key == ord('3'):
-        combo, challenge, reaction = not combo, False, False
-        combo_idx, combo_score = 0, 0
     elif key in [81, 2]: manual_idx = (manual_idx - 1) % len(poses) if manual_idx >= 0 else len(poses) - 1
     elif key in [83, 3]: manual_idx = (manual_idx + 1) % len(poses)
     elif key in [82, 0]: manual_idx = -1
