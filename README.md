@@ -30,7 +30,7 @@ A real-time pose detection application that displays monkey memes based on your 
 ## Requirements
 
 - Python 3.11+
-- Webcam
+- Computer with a webcam
 
 ## Installation
 
