@@ -31,32 +31,17 @@ A real-time pose detection application built with Python, OpenCV, and MediaPipe 
 
 - Python 3.11+
 - Computer with a webcam
+- Libraries in requirements.txt
 
-## Installation
+## Setup and running program
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Setup
-
-Create a `memes/` folder in the project directory with the following images:
-
-```
-memes/
-  thinking.jpg
-  pointing.jpg
-  shocked.jpg
-  staring.jpg
-```
-
-## Usage
-
 ```bash
 python main.py
 ```
-
-The application will display a brief tutorial on startup showing how to trigger each pose.
 
 ## Controls
 
@@ -80,23 +65,3 @@ The application will display a brief tutorial on startup showing how to trigger 
 | C | Switch camera |
 | ←/→ | Manually cycle through memes |
 | ↑ | Return to auto-detection |
-
-## Output
-
-- Screenshots are saved to `screenshots/`
-- Video recordings are saved to `recordings/`
-- GIF frames are exported as numbered PNG files (you have to combine tem yourself unfortunately)
-
-## Project Structure
-
-```
-mreme/
-├── main.py
-├── memes/
-│   ├── thinking.jpg
-│   ├── pointing.jpg
-│   ├── shocked.jpg
-│   └── staring.jpg
-├── screenshots/
-└── recordings/
-```
