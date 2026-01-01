@@ -1,6 +1,6 @@
 # Meme Mirror
 
-A real-time pose detection application that displays monkey memes based on your body poses. The app uses computer vision to detect when you're in a "thinking" pose, pointing upward, or making a shocked expression, and displays the corresponding monkey meme template.
+A real-time pose detection application built with Python, OpenCV, and MediaPipe that displays specific monkey memes based on your body poses. The app uses computer vision to instantly detect and match four distinct states: **Staring** (neutral), **Thinking** (hand on chin), **Pointing** (finger up), and **Shocked** (open mouth), displaying the corresponding monkey meme template in real-time.
 
 <p align="center">
   <img src="memes/staring.jpg" width="180" />
