@@ -176,3 +176,9 @@ Thumbs.db
 # OpenCV/MediaPipe specific (if needed)
 # *.xml (OpenCV cascades)
 # *.yaml (MediaPipe configs)
+# App output
+screenshots/
+recordings/
+
+# MediaPipe model downloaded on first run
+models/

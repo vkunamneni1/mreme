@@ -1,23 +1,68 @@
 import os
+import sys
 import math
 import time
 import random
+import argparse
+import urllib.request
 from collections import deque
+
+# Hardware transforms make the Windows Media Foundation backend take several seconds to open a webcam
+os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")
+
 import cv2
 import numpy as np
 import mediapipe as mp
+import pyvirtualcam
 
 
 WINDOW_NAME = "Meme Mirror"
 TOUCH_THRESHOLD = 0.08
 MOUTH_OPEN_THRESHOLD = 0.5
 POINTING_OFFSET = 0.05
+# How close a hand must be to an eye to count as wiping tears, measured in eye-to-eye distances
+EYE_RUB_DISTANCE = 0.7
+# Fingertip distance from the wrist divided by the finger's middle joint distance from the wrist
+FINGER_STRAIGHT_REACH = 1.2
+FINGER_CURLED_REACH = 1.0
+# The chest is the band from the shoulders down to this many shoulder widths below them
+CHEST_DEPTH = 0.8
+MIN_VISIBILITY = 0.5
+POSE_STABILITY_FRAMES = 3
+MAX_CAMERAS = 3
+CAMERA_TIMEOUT_SECONDS = 3
+VIRTUAL_CAM_WIDTH, VIRTUAL_CAM_HEIGHT, VIRTUAL_CAM_FPS = 1280, 720, 30
+# Media Foundation only lists real webcams on Windows; the DirectShow fallback would also
+# open the OBS Virtual Camera and feed the app its own output
+CAMERA_API = cv2.CAP_MSMF if sys.platform == "win32" else cv2.CAP_ANY
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SCREENSHOT_DIR = os.path.join(BASE_DIR, "screenshots")
+RECORDING_DIR = os.path.join(BASE_DIR, "recordings")
+MODEL_PATH = os.path.join(BASE_DIR, "models", "holistic_landmarker.task")
+MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/holistic_landmarker/"
+             "holistic_landmarker/float16/1/holistic_landmarker.task")
+
+vision = mp.tasks.vision
+drawing_utils = vision.drawing_utils
 
 MEME_PATHS = {
-    "thinking": "memes/thinking.jpg",
-    "pointing": "memes/pointing.jpg",
-    "shocked": "memes/shocked.jpg",
-    "staring": "memes/staring.jpg",
+    "thinking": os.path.join(BASE_DIR, "memes", "thinking.jpg"),
+    "pointing": os.path.join(BASE_DIR, "memes", "pointing.jpg"),
+    "shocked": os.path.join(BASE_DIR, "memes", "shocked.jpg"),
+    "staring": os.path.join(BASE_DIR, "memes", "staring.jpg"),
+    "loving": os.path.join(BASE_DIR, "memes", "loving.jpg"),
+    "sad": os.path.join(BASE_DIR, "memes", "sad.jpg"),
+    "middle_finger": os.path.join(BASE_DIR, "memes", "middle_finger.jpg"),
+}
+
+KEY_LEFT, KEY_RIGHT, KEY_UP = -2, -3, -4
+
+# Raw cv2.waitKeyEx codes for arrow keys on Windows, Linux (GTK) and macOS
+ARROW_KEY_CODES = {
+    2424832: KEY_LEFT, 65361: KEY_LEFT, 63234: KEY_LEFT,
+    2555904: KEY_RIGHT, 65363: KEY_RIGHT, 63235: KEY_RIGHT,
+    2490368: KEY_UP, 65362: KEY_UP, 63232: KEY_UP,
 }
 
 POSE_COLORS = {
@@ -25,6 +70,9 @@ POSE_COLORS = {
     "thinking": (0, 180, 255),
     "pointing": (0, 255, 120),
     "shocked": (80, 80, 255),
+    "loving": (180, 105, 255),
+    "sad": (230, 160, 60),
+    "middle_finger": (220, 60, 160),
 }
 
 ROAST_MESSAGES = [
@@ -50,7 +98,7 @@ class AppState:
     def __init__(self):
         self.debug_mode = False
         self.fullscreen = False
-        self.meme_only = False
+        self.meme_only = True
         self.paused = False
         self.side_by_side = False
         self.pip_mode = False
@@ -72,18 +120,91 @@ class AppState:
         self.blend_alpha = 1.0
         self.flash_intensity = 0
         self.video_writer = None
+        self.virtual_cam = None
         self.gif_buffer = deque(maxlen=90)
         self.pose_history = []
         self.last_detected_pose = "staring"
         self.frame_timestamp = time.time()
         self.session_start = time.time()
-        self.pose_counts = {"thinking": 0, "pointing": 0, "shocked": 0, "staring": 0}
+        self.pose_counts = {pose_name: 0 for pose_name in MEME_PATHS}
         self.cringe_score = 0
         self.ego_deaths = 0
         self.last_roast = ""
         self.roast_timer = 0
         self.frame_count = 0
         self.ui_pulse = 0
+        self.frame_interval = 1 / 30
+        self.stable_pose = "staring"
+        self.stable_flip = False
+        self.last_output = None
+        self.video_size = None
+        self.window_size = None
+        self.sized_memes = None
+        self.sized_memes_key = None
+
+
+def wait_for_key(delay):
+    key = cv2.waitKeyEx(delay)
+    if key in ARROW_KEY_CODES:
+        return ARROW_KEY_CODES[key]
+    key &= 0xFF
+    if ord("A") <= key <= ord("Z"):
+        key += ord("a") - ord("A")
+    return key
+
+
+def window_closed():
+    return cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1
+
+
+def camera_is_streaming(capture, attempts=20):
+    for _ in range(attempts):
+        if capture.read()[0]:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def switch_camera(state, capture):
+    previous_index = state.camera_index
+    for offset in range(1, MAX_CAMERAS):
+        next_index = (previous_index + offset) % MAX_CAMERAS
+        capture.release()
+        if capture.open(next_index, CAMERA_API) and camera_is_streaming(capture, attempts=5):
+            state.camera_index = next_index
+            return
+    capture.release()
+    capture.open(previous_index, CAMERA_API)
+
+
+def start_virtual_camera(state):
+    try:
+        state.virtual_cam = pyvirtualcam.Camera(
+            VIRTUAL_CAM_WIDTH, VIRTUAL_CAM_HEIGHT, VIRTUAL_CAM_FPS, fmt=pyvirtualcam.PixelFormat.BGR
+        )
+    except RuntimeError as error:
+        print(f"Virtual camera is off: {error}\n"
+              "On Windows, install OBS Studio (https://obsproject.com) to get the OBS Virtual Camera, "
+              "then press O to try again. Run with --no-virtual-cam to skip it.")
+        return
+    print(f"Virtual camera on: pick '{state.virtual_cam.device}' as the camera in Teams/Zoom")
+    cv2.setWindowTitle(WINDOW_NAME, f"{WINDOW_NAME} - virtual camera on")
+
+
+def stop_virtual_camera(state):
+    if state.virtual_cam is not None:
+        state.virtual_cam.close()
+        state.virtual_cam = None
+
+
+def fit_to_frame(image, width, height):
+    image_height, image_width = image.shape[:2]
+    scale = min(width / image_width, height / image_height)
+    fitted_width, fitted_height = int(image_width * scale), int(image_height * scale)
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    x, y = (width - fitted_width) // 2, (height - fitted_height) // 2
+    frame[y : y + fitted_height, x : x + fitted_width] = cv2.resize(image, (fitted_width, fitted_height))
+    return frame
 
 
 def calculate_distance(point_a, point_b):
@@ -91,16 +212,15 @@ def calculate_distance(point_a, point_b):
 
 
 def get_finger_position(hand_landmarks, finger_index=8):
-    if hand_landmarks is None:
+    if not hand_landmarks:
         return None
-    landmark = hand_landmarks.landmark[finger_index]
-    return [landmark.x, landmark.y, getattr(landmark, "visibility", 1.0)]
+    landmark = hand_landmarks[finger_index]
+    return [landmark.x, landmark.y]
 
 
-def calculate_mouth_openness(face_landmarks):
-    if face_landmarks is None:
+def calculate_mouth_openness(landmarks):
+    if not landmarks:
         return 0
-    landmarks = face_landmarks.landmark
     upper_lip = [landmarks[13].x, landmarks[13].y]
     lower_lip = [landmarks[14].x, landmarks[14].y]
     left_corner = [landmarks[78].x, landmarks[78].y]
@@ -110,6 +230,52 @@ def calculate_mouth_openness(face_landmarks):
     if horizontal_distance == 0:
         return 0
     return vertical_distance / horizontal_distance
+
+
+def is_hand_on_eye(hand_landmarks, landmarks, frame_width, frame_height):
+    if not hand_landmarks:
+        return False
+    eyes = [[landmarks[index].x * frame_width, landmarks[index].y * frame_height] for index in (2, 5)]
+    eye_distance = calculate_distance(*eyes)
+    # Thumb tip plus the knuckles and tips of the index and middle fingers
+    hand_points = [[hand_landmarks[index].x * frame_width, hand_landmarks[index].y * frame_height]
+                   for index in (4, 5, 6, 8, 9, 10, 12)]
+    return any(calculate_distance(point, eye) < eye_distance * EYE_RUB_DISTANCE
+               for point in hand_points for eye in eyes)
+
+
+def calculate_finger_reach(hand_landmarks, tip_index, middle_joint_index):
+    wrist = [hand_landmarks[0].x, hand_landmarks[0].y]
+    tip = [hand_landmarks[tip_index].x, hand_landmarks[tip_index].y]
+    middle_joint = [hand_landmarks[middle_joint_index].x, hand_landmarks[middle_joint_index].y]
+    joint_distance = calculate_distance(wrist, middle_joint)
+    if joint_distance == 0:
+        return 0
+    return calculate_distance(wrist, tip) / joint_distance
+
+
+def is_middle_finger_up(hand_landmarks):
+    if not hand_landmarks:
+        return False
+    other_fingers = [(8, 6), (16, 14), (20, 18)]
+    return (calculate_finger_reach(hand_landmarks, 12, 10) > FINGER_STRAIGHT_REACH
+            and all(calculate_finger_reach(hand_landmarks, tip, joint) < FINGER_CURLED_REACH
+                    for tip, joint in other_fingers))
+
+
+def is_hand_on_chest(landmarks, palm_indices, frame_width, frame_height):
+    palm_landmarks = [landmarks[index] for index in palm_indices]
+    if min(landmark.visibility for landmark in palm_landmarks) < MIN_VISIBILITY:
+        return False
+    palm_x = sum(landmark.x for landmark in palm_landmarks) / len(palm_landmarks) * frame_width
+    palm_y = sum(landmark.y for landmark in palm_landmarks) / len(palm_landmarks) * frame_height
+    left_shoulder = [landmarks[11].x * frame_width, landmarks[11].y * frame_height]
+    right_shoulder = [landmarks[12].x * frame_width, landmarks[12].y * frame_height]
+    shoulder_width = calculate_distance(left_shoulder, right_shoulder)
+    shoulder_y = (left_shoulder[1] + right_shoulder[1]) / 2
+    shoulder_left_x, shoulder_right_x = sorted([left_shoulder[0], right_shoulder[0]])
+    return (shoulder_left_x < palm_x < shoulder_right_x
+            and shoulder_y < palm_y < shoulder_y + shoulder_width * CHEST_DEPTH)
 
 
 def apply_glitch_effect(text):
@@ -155,10 +321,10 @@ def draw_scanline_overlay(image, line_spacing=4, overlay_alpha=0.03):
 
 
 def get_face_bounding_box(face_landmarks, frame_width, frame_height, padding=0.3):
-    if face_landmarks is None:
+    if not face_landmarks:
         return None
-    x_coords = [lm.x * frame_width for lm in face_landmarks.landmark]
-    y_coords = [lm.y * frame_height for lm in face_landmarks.landmark]
+    x_coords = [lm.x * frame_width for lm in face_landmarks]
+    y_coords = [lm.y * frame_height for lm in face_landmarks]
     min_x, min_y = min(x_coords), min(y_coords)
     max_x, max_y = max(x_coords), max(y_coords)
     face_width = max_x - min_x
@@ -212,24 +378,64 @@ def load_meme_images():
         image = cv2.imread(file_path)
         if image is None:
             print(f"Error: Cannot load meme image at {file_path}")
-            exit(1)
+            sys.exit(1)
         images[pose_name] = image
     return images
 
 
+def get_sized_memes(state, meme_images, frame_width, frame_height):
+    # Meme-only shows the memes square at the virtual camera's height; the split view squeezes them
+    if state.meme_only:
+        meme_size = (VIRTUAL_CAM_HEIGHT, VIRTUAL_CAM_HEIGHT)
+    else:
+        meme_size = (frame_width, frame_height // 2)
+    if state.sized_memes_key != meme_size:
+        state.sized_memes = {}
+        for pose_name, image in meme_images.items():
+            if state.meme_only:
+                resized = fit_to_frame(image, *meme_size)
+            else:
+                resized = cv2.resize(image, meme_size)
+            state.sized_memes[pose_name] = {
+                "normal": resized,
+                "flipped": cv2.flip(resized, 1),
+            }
+        state.sized_memes_key = meme_size
+    return state.sized_memes
+
+
 def setup_directories():
-    os.makedirs("screenshots", exist_ok=True)
-    os.makedirs("recordings", exist_ok=True)
+    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+    os.makedirs(RECORDING_DIR, exist_ok=True)
+
+
+def download_model():
+    if os.path.exists(MODEL_PATH):
+        return True
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+    print(f"Downloading pose model to {MODEL_PATH} (one time, about 14 MB)...")
+    partial_path = MODEL_PATH + ".part"
+    try:
+        urllib.request.urlretrieve(MODEL_URL, partial_path)
+    except OSError as error:
+        print(f"Error: Cannot download pose model: {error}\n"
+              f"Download {MODEL_URL} manually and save it as {MODEL_PATH}")
+        return False
+    os.replace(partial_path, MODEL_PATH)
+    return True
 
 
 def create_pose_detector():
-    return mp.solutions.holistic.Holistic(
-        min_detection_confidence=0.6,
-        min_tracking_confidence=0.6,
-        smooth_landmarks=True,
-        model_complexity=1,
-        refine_face_landmarks=True,
+    options = vision.HolisticLandmarkerOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=MODEL_PATH),
+        running_mode=vision.RunningMode.VIDEO,
+        min_pose_detection_confidence=0.6,
+        min_pose_landmarks_confidence=0.6,
+        min_face_detection_confidence=0.6,
+        min_face_landmarks_confidence=0.6,
+        min_hand_landmarks_confidence=0.6,
     )
+    return vision.HolisticLandmarker.create_from_options(options)
 
 
 def show_splash_screen(meme_images):
@@ -270,8 +476,8 @@ def show_splash_screen(meme_images):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (60, 60, 60), 1)
 
         cv2.imshow(WINDOW_NAME, canvas)
-        key = cv2.waitKey(50) & 0xFF
-        if key == ord("q"):
+        key = wait_for_key(50)
+        if key == ord("q") or window_closed():
             return False
         if key == ord(" ") and frame_index > 8:
             break
@@ -344,14 +550,14 @@ def show_splash_screen(meme_images):
         else:
             flash_value = 255 if frame_index % 2 == 0 else 0
             canvas[:] = (flash_value, flash_value, flash_value)
-            go_text = random.choice(["GO", "→", "POSE"])
+            go_text = random.choice(["GO", ">>", "POSE"])
             (go_w, go_h), _ = cv2.getTextSize(go_text, cv2.FONT_HERSHEY_SIMPLEX, 3, 4)
             text_color = (0, 0, 0) if flash_value else (255, 255, 255)
             cv2.putText(canvas, go_text, (screen_width // 2 - go_w // 2, screen_height // 2 + go_h // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 3, text_color, 4)
 
         cv2.imshow(WINDOW_NAME, canvas)
-        if cv2.waitKey(45) & 0xFF == ord("q"):
+        if wait_for_key(45) == ord("q") or window_closed():
             return False
 
     tutorial_slides = [
@@ -359,7 +565,11 @@ def show_splash_screen(meme_images):
         ("THINKING", "finger on chin", "thinking", (0, 180, 255)),
         ("POINTING", "point up above head", "pointing", (0, 255, 120)),
         ("SHOCKED", "open mouth wide", "shocked", (80, 80, 255)),
+        ("LOVING", "hand on chest", "loving", (180, 105, 255)),
+        ("SAD", "rub your eye like you're crying", "sad", (230, 160, 60)),
+        ("MIDDLE FINGER", "show your middle finger", "middle_finger", (220, 60, 160)),
     ]
+    page_count = len(tutorial_slides) + 1
 
     for slide_index, (title, description, pose_key, color) in enumerate(tutorial_slides):
         canvas[:] = (10, 10, 10)
@@ -374,14 +584,14 @@ def show_splash_screen(meme_images):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 1)
 
         if pose_key in meme_images:
-            thumbnail = cv2.resize(meme_images[pose_key], (300, 170))
+            thumbnail = fit_to_frame(meme_images[pose_key], 300, 170)
             thumb_x = screen_width // 2 - 150
             thumb_y = 160
             canvas[thumb_y : thumb_y + 170, thumb_x : thumb_x + 300] = thumbnail
             draw_corner_brackets(canvas, thumb_x - 2, thumb_y - 2, thumb_x + 302, thumb_y + 172,
                                  color, corner_length=12, thickness=2)
 
-        page_text = f"{slide_index + 1}/5"
+        page_text = f"{slide_index + 1}/{page_count}"
         cv2.putText(canvas, page_text, (screen_width - 60, screen_height - 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 60), 1)
         cv2.putText(canvas, "SPACE to continue", (screen_width // 2 - 80, screen_height - 50),
@@ -389,8 +599,8 @@ def show_splash_screen(meme_images):
 
         cv2.imshow(WINDOW_NAME, canvas)
         while True:
-            key = cv2.waitKey(50) & 0xFF
-            if key == ord("q"):
+            key = wait_for_key(50)
+            if key == ord("q") or window_closed():
                 return False
             if key == ord(" "):
                 break
@@ -410,21 +620,23 @@ def show_splash_screen(meme_images):
         "S - screenshot",
         "R - start/stop recording",
         "F - fullscreen",
+        "M - meme only / split view",
+        "O - virtual camera on/off",
         "Q - quit",
     ]
     for i, control in enumerate(control_list):
         cv2.putText(canvas, control, (screen_width // 2 - 120, 110 + i * 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
 
-    cv2.putText(canvas, "5/5", (screen_width - 60, screen_height - 30),
+    cv2.putText(canvas, f"{page_count}/{page_count}", (screen_width - 60, screen_height - 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 60), 1)
     cv2.putText(canvas, "SPACE to start", (screen_width // 2 - 70, screen_height - 50),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (80, 80, 80), 1)
 
     cv2.imshow(WINDOW_NAME, canvas)
     while True:
-        key = cv2.waitKey(50) & 0xFF
-        if key == ord("q"):
+        key = wait_for_key(50)
+        if key == ord("q") or window_closed():
             return False
         if key == ord(" "):
             break
@@ -443,10 +655,10 @@ def detect_current_pose(pose_results, frame_width, frame_height):
     detected_pose = "staring"
     should_flip = False
 
-    if pose_results.pose_landmarks is None:
+    if not pose_results.pose_landmarks:
         return detected_pose, should_flip
 
-    landmarks = pose_results.pose_landmarks.landmark
+    landmarks = pose_results.pose_landmarks
     nose_position = [landmarks[0].x, landmarks[0].y]
     left_mouth = [landmarks[9].x, landmarks[9].y]
     right_mouth = [landmarks[10].x, landmarks[10].y]
@@ -455,6 +667,15 @@ def detect_current_pose(pose_results, frame_width, frame_height):
     right_finger = get_finger_position(pose_results.right_hand_landmarks)
     left_finger = get_finger_position(pose_results.left_hand_landmarks)
     mouth_ratio = calculate_mouth_openness(pose_results.face_landmarks)
+
+    if (is_middle_finger_up(pose_results.right_hand_landmarks)
+            or is_middle_finger_up(pose_results.left_hand_landmarks)):
+        return "middle_finger", should_flip
+
+    # A fist on the eye also holds the fingertips above the nose, so this goes before pointing
+    if (is_hand_on_eye(pose_results.right_hand_landmarks, landmarks, frame_width, frame_height)
+            or is_hand_on_eye(pose_results.left_hand_landmarks, landmarks, frame_width, frame_height)):
+        return "sad", should_flip
 
     is_thinking = False
 
@@ -480,8 +701,13 @@ def detect_current_pose(pose_results, frame_width, frame_height):
             detected_pose = "pointing"
             should_flip = True
 
-    if detected_pose == "staring" and mouth_ratio > MOUTH_OPEN_THRESHOLD:
-        detected_pose = "shocked"
+    if detected_pose == "staring":
+        # Wrist, pinky and index knuckles of each hand in the pose landmarks
+        if (is_hand_on_chest(landmarks, (15, 17, 19), frame_width, frame_height)
+                or is_hand_on_chest(landmarks, (16, 18, 20), frame_width, frame_height)):
+            detected_pose = "loving"
+        elif mouth_ratio > MOUTH_OPEN_THRESHOLD:
+            detected_pose = "shocked"
 
     return detected_pose, should_flip
 
@@ -490,8 +716,8 @@ def draw_debug_overlay(canvas, pose_results, frame_width, frame_height, mouth_ra
     cv2.putText(canvas, f"mouth:{mouth_ratio:.2f}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-    if pose_results.face_landmarks is not None:
-        face_lm = pose_results.face_landmarks.landmark
+    if pose_results.face_landmarks:
+        face_lm = pose_results.face_landmarks
         upper_lip_pos = (int(face_lm[13].x * frame_width), int(face_lm[13].y * frame_height))
         lower_lip_pos = (int(face_lm[14].x * frame_width), int(face_lm[14].y * frame_height))
         cv2.circle(canvas, upper_lip_pos, 5, (0, 255, 0), -1)
@@ -509,21 +735,21 @@ def draw_debug_overlay(canvas, pose_results, frame_width, frame_height, mouth_ra
         cv2.circle(canvas, pos, 10, (255, 0, 255), -1)
 
 
-def draw_skeleton_overlay(canvas, pose_results, drawing_utils):
+def draw_skeleton_overlay(canvas, pose_results):
     body_spec = drawing_utils.DrawingSpec(color=(255, 255, 255), thickness=3, circle_radius=2)
     hand_spec = drawing_utils.DrawingSpec(color=(0, 255, 255), thickness=2, circle_radius=2)
 
     drawing_utils.draw_landmarks(
         canvas, pose_results.pose_landmarks,
-        mp.solutions.holistic.POSE_CONNECTIONS, body_spec, body_spec
+        vision.PoseLandmarksConnections.POSE_LANDMARKS, body_spec, body_spec
     )
     drawing_utils.draw_landmarks(
         canvas, pose_results.right_hand_landmarks,
-        mp.solutions.holistic.HAND_CONNECTIONS, hand_spec, hand_spec
+        vision.HandLandmarksConnections.HAND_CONNECTIONS, hand_spec, hand_spec
     )
     drawing_utils.draw_landmarks(
         canvas, pose_results.left_hand_landmarks,
-        mp.solutions.holistic.HAND_CONNECTIONS, hand_spec, hand_spec
+        vision.HandLandmarksConnections.HAND_CONNECTIONS, hand_spec, hand_spec
     )
 
 
@@ -553,7 +779,7 @@ def draw_header_ui(canvas, state, frame_width, current_pose):
     cv2.line(canvas, (15, 17), (31, 33), (150, 150, 150), 1)
     cv2.line(canvas, (31, 17), (15, 33), (150, 150, 150), 1)
 
-    pose_text = current_pose.upper()
+    pose_text = current_pose.upper().replace("_", " ")
     if state.chaos_mode:
         pose_text = apply_glitch_effect(pose_text)
 
@@ -636,7 +862,7 @@ def compose_output_frame(camera_view, meme_view, state, frame_width, frame_heigh
         return np.vstack([camera_resized, meme_resized])
 
     if state.meme_only:
-        return cv2.resize(meme_view, (frame_width, frame_height))
+        return meme_view.copy()
 
     if state.side_by_side:
         camera_half = cv2.resize(camera_view, (frame_width // 2, frame_height))
@@ -660,8 +886,7 @@ def compose_output_frame(camera_view, meme_view, state, frame_width, frame_heigh
 def draw_status_indicators(output, state):
     output_height, output_width = output.shape[:2]
 
-    fps_value = 1 / (time.time() - state.frame_timestamp + 0.001)
-    fps_text = f"{int(fps_value)}"
+    fps_text = f"{int(1 / state.frame_interval)}"
     cv2.putText(output, fps_text, (10, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (50, 50, 50), 1)
     cv2.putText(output, "fps", (10 + len(fps_text) * 9, 18),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.3, (35, 35, 35), 1)
@@ -773,6 +998,7 @@ def draw_help_menu(output, state):
         "G - save gif", "F - fullscreen", "P - pause", "M - meme only",
         "B - side by side", "I - pip mode", "Z - zoom face",
         "X - chaos mode", "D - debug", "C - switch camera",
+        "O - virtual camera",
     ]
 
     menu_width = 180
@@ -799,11 +1025,13 @@ def handle_keypress(key, state, output, capture, pose_list):
     elif key == ord("d"):
         state.debug_mode = not state.debug_mode
     elif key == ord("s"):
-        filename = f"screenshots/meme_{int(time.time())}.png"
+        filename = os.path.join(SCREENSHOT_DIR, f"meme_{int(time.time() * 1000)}.png")
         cv2.imwrite(filename, output)
         state.flash_intensity = 255
     elif key == ord("f"):
         state.fullscreen = not state.fullscreen
+        window_mode = cv2.WINDOW_FULLSCREEN if state.fullscreen else cv2.WINDOW_NORMAL
+        cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, window_mode)
     elif key == ord("p"):
         state.paused = not state.paused
     elif key == ord("m"):
@@ -811,9 +1039,11 @@ def handle_keypress(key, state, output, capture, pose_list):
     elif key == ord("b"):
         state.side_by_side = not state.side_by_side
         state.pip_mode = False
+        state.meme_only = False
     elif key == ord("i"):
         state.pip_mode = not state.pip_mode
         state.side_by_side = False
+        state.meme_only = False
     elif key == ord("z"):
         state.zoom_face = not state.zoom_face
     elif key == ord("x"):
@@ -827,47 +1057,75 @@ def handle_keypress(key, state, output, capture, pose_list):
     elif key == ord("a"):
         state.face_crop = not state.face_crop
     elif key == ord("c"):
-        state.camera_index = (state.camera_index + 1) % 3
-        capture.release()
-        capture.open(state.camera_index)
+        switch_camera(state, capture)
+    elif key == ord("o"):
+        if state.virtual_cam is None:
+            start_virtual_camera(state)
+        else:
+            stop_virtual_camera(state)
+            cv2.setWindowTitle(WINDOW_NAME, WINDOW_NAME)
     elif key == ord("r"):
         state.recording = not state.recording
         if state.recording:
             output_height, output_width = output.shape[:2]
-            filename = f"recordings/meme_{int(time.time())}.mp4"
+            filename = os.path.join(RECORDING_DIR, f"meme_{int(time.time())}.mp4")
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             state.video_writer = cv2.VideoWriter(filename, fourcc, 20.0, (output_width, output_height))
+            state.video_size = (output_width, output_height)
+            if not state.video_writer.isOpened():
+                print(f"Error: Cannot start recording to {filename}")
+                state.recording = False
+                state.video_writer = None
         elif state.video_writer is not None:
             state.video_writer.release()
             state.video_writer = None
     elif key == ord("g"):
+        gif_dir = os.path.join(SCREENSHOT_DIR, f"gif_{int(time.time())}")
+        os.makedirs(gif_dir, exist_ok=True)
         for i, frame in enumerate(state.gif_buffer):
-            cv2.imwrite(f"screenshots/gif_{i:03d}.png", frame)
+            cv2.imwrite(os.path.join(gif_dir, f"frame_{i:03d}.png"), frame)
         state.flash_intensity = 255
     elif key == ord("t"):
         state.last_roast = random.choice(ROAST_MESSAGES)
         state.roast_timer = time.time()
-    elif key in [81, 2]:
+    elif key == KEY_LEFT:
         if state.manual_pose_index >= 0:
             state.manual_pose_index = (state.manual_pose_index - 1) % len(pose_list)
         else:
             state.manual_pose_index = len(pose_list) - 1
-    elif key in [83, 3]:
+    elif key == KEY_RIGHT:
         state.manual_pose_index = (state.manual_pose_index + 1) % len(pose_list)
-    elif key in [82, 0]:
+    elif key == KEY_UP:
         state.manual_pose_index = -1
 
     return True
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Meme Mirror")
+    parser.add_argument("--virtual-cam", action=argparse.BooleanOptionalAction, default=True,
+                        help="send the output to a virtual camera for Teams/Zoom (on by default)")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     setup_directories()
     meme_images = load_meme_images()
     pose_list = list(MEME_PATHS.keys())
 
-    capture = cv2.VideoCapture(0)
+    if not download_model():
+        return
+
+    capture = cv2.VideoCapture(0, CAMERA_API)
     if not capture.isOpened():
         print("Error: Cannot open camera")
+        return
+
+    if not camera_is_streaming(capture):
+        print("Error: Camera opened but is not sending frames. "
+              "Close other apps using the webcam (Teams, Zoom, browser tabs, OBS) and try again.")
+        capture.release()
         return
 
     if not show_splash_screen(meme_images):
@@ -876,55 +1134,68 @@ def main():
         return
 
     pose_detector = create_pose_detector()
-    drawing_utils = mp.solutions.drawing_utils
     state = AppState()
+    if args.virtual_cam:
+        start_virtual_camera(state)
+    last_frame_time = time.time()
+    last_timestamp_ms = 0
 
     while capture.isOpened():
         success, frame = capture.read()
         if not success:
+            if time.time() - last_frame_time > CAMERA_TIMEOUT_SECONDS:
+                print("Error: Camera stopped sending frames")
+                break
+            if wait_for_key(10) == ord("q") or window_closed():
+                break
             continue
+        last_frame_time = time.time()
 
         frame = cv2.flip(frame, 1)
         frame_height, frame_width = frame.shape[:2]
 
         if state.paused:
-            cv2.imshow(WINDOW_NAME, state.last_output if hasattr(state, "last_output") else frame)
-            key = cv2.waitKey(5) & 0xFF
+            cv2.imshow(WINDOW_NAME, state.last_output if state.last_output is not None else frame)
+            key = wait_for_key(5)
             if key == ord("p"):
                 state.paused = False
-            if key == ord("q"):
+            if key == ord("q") or window_closed():
                 break
             continue
 
-        sized_memes = {}
-        for pose_name, image in meme_images.items():
-            resized = cv2.resize(image, (frame_width, frame_height // 2))
-            sized_memes[pose_name] = {
-                "normal": resized,
-                "flipped": cv2.flip(resized, 1),
-            }
+        frame_interval = max(last_frame_time - state.frame_timestamp, 1e-3)
+        state.frame_timestamp = last_frame_time
+        state.frame_interval = 0.9 * state.frame_interval + 0.1 * frame_interval
+
+        sized_memes = get_sized_memes(state, meme_images, frame_width, frame_height)
 
         canvas = frame.copy()
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        pose_results = pose_detector.process(rgb_frame)
+        # VIDEO mode needs strictly increasing timestamps
+        timestamp_ms = max(int(last_frame_time * 1000), last_timestamp_ms + 1)
+        last_timestamp_ms = timestamp_ms
+        pose_results = pose_detector.detect_for_video(
+            mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame), timestamp_ms
+        )
 
         detected_pose, should_flip = detect_current_pose(pose_results, frame_width, frame_height)
 
-        if state.debug_mode and pose_results.pose_landmarks is not None:
+        if state.debug_mode and pose_results.pose_landmarks:
             mouth_ratio = calculate_mouth_openness(pose_results.face_landmarks)
             draw_debug_overlay(canvas, pose_results, frame_width, frame_height, mouth_ratio)
 
-        if detected_pose == "staring" and pose_results.pose_landmarks is not None:
-            draw_skeleton_overlay(canvas, pose_results, drawing_utils)
+        if detected_pose == "staring" and pose_results.pose_landmarks:
+            draw_skeleton_overlay(canvas, pose_results)
 
         state.pose_history.append(detected_pose)
-        if len(state.pose_history) > 5:
+        if len(state.pose_history) > POSE_STABILITY_FRAMES:
             state.pose_history.pop(0)
 
-        stable_pose = detected_pose
-        if len(state.pose_history) >= 2:
-            if state.pose_history.count(state.pose_history[-1]) >= 2:
-                stable_pose = state.pose_history[-1]
+        if state.pose_history.count(detected_pose) == POSE_STABILITY_FRAMES:
+            state.stable_pose = detected_pose
+            state.stable_flip = should_flip
+        stable_pose = state.stable_pose
+        should_flip = state.stable_flip
 
         state.pose_counts[stable_pose] += 1
         total_poses = sum(state.pose_counts.values())
@@ -989,7 +1260,7 @@ def main():
                     state.flash_intensity = 180
         state.previous_meme = sized_memes[display_pose][meme_variant].copy()
 
-        if state.face_crop and pose_results.face_landmarks is not None:
+        if state.face_crop and pose_results.face_landmarks:
             face_bbox = get_face_bounding_box(pose_results.face_landmarks, frame_width, frame_height)
             meme_height, meme_width = current_meme.shape[:2]
             face_target_regions = {
@@ -1001,6 +1272,12 @@ def main():
                             int(meme_width * 0.75), int(meme_height * 0.55)),
                 "staring": (int(meme_width * 0.25), int(meme_height * 0.08),
                             int(meme_width * 0.75), int(meme_height * 0.58)),
+                "loving": (int(meme_width * 0.3), int(meme_height * 0.03),
+                           int(meme_width * 0.72), int(meme_height * 0.48)),
+                "sad": (int(meme_width * 0.25), int(meme_height * 0.03),
+                        int(meme_width * 0.78), int(meme_height * 0.52)),
+                "middle_finger": (int(meme_width * 0.33), int(meme_height * 0.02),
+                                  int(meme_width * 0.78), int(meme_height * 0.5)),
             }
             if display_pose in face_target_regions:
                 current_meme = blend_face_onto_meme(
@@ -1020,20 +1297,20 @@ def main():
 
         camera_view = canvas.copy()
 
-        if state.zoom_face and pose_results.pose_landmarks is not None:
-            nose = pose_results.pose_landmarks.landmark[0]
+        if state.zoom_face and pose_results.pose_landmarks:
+            nose = pose_results.pose_landmarks[0]
             center_x = int(nose.x * frame_width)
             center_y = int(nose.y * frame_height)
-            zoom_size = min(frame_width, frame_height) // 2
+            zoom_width = frame_width // 2
+            zoom_height = frame_height // 2
 
-            crop_x1 = max(0, center_x - zoom_size // 2)
-            crop_y1 = max(0, center_y - zoom_size // 2)
-            crop_x2 = min(frame_width, crop_x1 + zoom_size)
-            crop_y2 = min(frame_height, crop_y1 + zoom_size)
+            crop_x1 = min(max(0, center_x - zoom_width // 2), frame_width - zoom_width)
+            crop_y1 = min(max(0, center_y - zoom_height // 2), frame_height - zoom_height)
+            crop_x2 = crop_x1 + zoom_width
+            crop_y2 = crop_y1 + zoom_height
 
-            if crop_x2 - crop_x1 > 50 and crop_y2 - crop_y1 > 50:
-                camera_view = cv2.resize(canvas[crop_y1:crop_y2, crop_x1:crop_x2],
-                                         (frame_width, frame_height))
+            camera_view = cv2.resize(canvas[crop_y1:crop_y2, crop_x1:crop_x2],
+                                     (frame_width, frame_height))
 
         header_height = draw_header_ui(camera_view, state, frame_width, display_pose)
         draw_footer_ui(camera_view, state, frame_width, frame_height, display_pose)
@@ -1042,14 +1319,16 @@ def main():
 
         output = compose_output_frame(camera_view, current_meme, state, frame_width, frame_height)
 
-        state.frame_timestamp = time.time()
-
         if not state.meme_only:
             draw_scanline_overlay(output, line_spacing=3, overlay_alpha=0.02)
+        draw_watermark(output, state)
+
+        # The virtual camera gets the picture without the on-screen controls drawn below
+        if state.virtual_cam is not None:
+            state.virtual_cam.send(fit_to_frame(output, VIRTUAL_CAM_WIDTH, VIRTUAL_CAM_HEIGHT))
 
         draw_status_indicators(output, state)
         draw_mode_badges(output, state)
-        draw_watermark(output, state)
 
         output_height, output_width = output.shape[:2]
         draw_corner_brackets(output, 4, output_height - 28, output_width - 4, output_height - 4,
@@ -1060,26 +1339,28 @@ def main():
         draw_help_menu(output, state)
 
         if state.recording and state.video_writer is not None:
-            state.video_writer.write(output)
+            if (output_width, output_height) != state.video_size:
+                state.video_writer.write(cv2.resize(output, state.video_size))
+            else:
+                state.video_writer.write(output)
 
         state.gif_buffer.append(output.copy())
         state.last_output = output
 
-        if state.fullscreen:
-            cv2.namedWindow(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN)
-            cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-        else:
-            cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+        if not state.fullscreen and state.window_size != (output_width, output_height):
+            cv2.resizeWindow(WINDOW_NAME, output_width, output_height)
+            state.window_size = (output_width, output_height)
 
         cv2.imshow(WINDOW_NAME, output)
 
-        key = cv2.waitKey(5) & 0xFF
-        if not handle_keypress(key, state, output, capture, pose_list):
+        key = wait_for_key(5)
+        if window_closed() or not handle_keypress(key, state, output, capture, pose_list):
             break
 
     capture.release()
     if state.video_writer is not None:
         state.video_writer.release()
+    stop_virtual_camera(state)
     cv2.destroyAllWindows()
     pose_detector.close()
 
